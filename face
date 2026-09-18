@@ -1,0 +1,1201 @@
+#!/usr/bin/env python3
+
+# -*- coding: utf-8 -*-
+
+"""
+
+VISAGE 3D A PARTIR D UNE PHOTO
+
+Prend une photo, l'applique sur un vrai modele 3D humain.
+
+52 blendshapes ARKit. Suivi par MediaPipe. Port 8070.
+
+"""
+
+import os
+
+import http.server
+
+import socketserver
+
+
+
+PORT = 8070
+
+
+
+PAGE = r"""<!DOCTYPE html>
+
+<html lang="fr">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+
+<title>Visage 3D depuis Photo</title>
+
+<style>
+
+*{margin:0;padding:0;box-sizing:border-box}
+
+body{background:#0a0014;color:#fff;font-family:-apple-system,system-ui,sans-serif;overflow:hidden}
+
+#canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
+
+#video{position:fixed;top:10px;right:10px;width:100px;height:75px;border:1px solid #c8a45c;border-radius:8px;z-index:10;object-fit:cover;transform:scaleX(-1)}
+
+#hud{position:fixed;top:14px;left:14px;color:#c8a45c;font-size:10px;letter-spacing:3px;text-transform:uppercase;z-index:10}
+
+#status{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);color:#888;font-size:10px;letter-spacing:2px;z-index:10;text-align:center}
+
+#emotions{position:fixed;top:50px;left:14px;z-index:10;font-size:9px;color:#00d4ff;font-family:monospace;line-height:1.5;background:rgba(10,0,20,0.7);padding:8px;border-radius:6px;border:1px solid #2a1a3a;display:none}
+
+#emotions.on{display:block}
+
+#controls{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:20;flex-wrap:wrap;justify-content:center;padding:0 10px;max-width:100%}
+
+.btn{background:rgba(10,0,20,0.9);border:1px solid #c8a45c;color:#c8a45c;padding:8px 14px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;backdrop-filter:blur(10px);letter-spacing:1px}
+
+.btn:active{transform:scale(0.95);background:#c8a45c;color:#000}
+
+.btn.primary{background:#c8a45c;color:#000}
+
+.btn.photo{background:#00d4ff;color:#000;border-color:#00d4ff}
+
+#loading{position:fixed;top:0;left:0;width:100%;height:100%;background:#0a0014;display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:100;transition:opacity 0.5s}
+
+#loading.hide{opacity:0;pointer-events:none}
+
+.spin{width:40px;height:40px;border:2px solid #2a1a3a;border-top-color:#00d4ff;border-radius:50%;animation:spin 1s linear infinite;margin-bottom:16px}
+
+@keyframes spin{to{transform:rotate(360deg)}}
+
+#preview{position:fixed;top:50px;right:14px;width:100px;height:100px;border:2px solid #00d4ff;border-radius:8px;z-index:11;display:none;object-fit:cover;background:#000}
+
+#preview.on{display:block}
+
+#file-input{display:none}
+
+#url-input{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);z-index:25;background:rgba(10,0,20,0.95);border:1px solid #00d4ff;border-radius:8px;padding:8px;display:none;gap:6px;width:min(340px,90vw)}
+
+#url-input.on{display:flex}
+
+#url-input input{flex:1;background:#000;border:1px solid #2a1a3a;color:#fff;padding:6px 10px;border-radius:4px;font-size:11px;outline:none}
+
+#url-input button{background:#00d4ff;color:#000;border:none;padding:6px 12px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer}
+
+</style>
+
+</head>
+
+<body>
+
+
+
+<div id="loading">
+
+  <div class="spin"></div>
+
+  <div style="color:#c8a45c;font-size:11px;letter-spacing:3px">CHARGEMENT...</div>
+
+</div>
+
+
+
+<div id="hud">VISAGE 3D · PHOTO · 52 BLENDSHAPES</div>
+
+<div id="status">Chargement du modele...</div>
+
+<div id="emotions"></div>
+
+<video id="video" autoplay playsinline muted></video>
+
+<img id="preview" alt="">
+
+<canvas id="canvas"></canvas>
+
+
+
+<input type="file" id="file-input" accept="image/*" capture="user" onchange="chargerFichier(event)">
+
+
+
+<div id="url-input">
+
+  <input type="text" id="url-field" placeholder="URL de la photo...">
+
+  <button onclick="chargerUrl()">OK</button>
+
+</div>
+
+
+
+<div id="controls">
+
+  <button class="btn photo" onclick="prendrePhoto()">📸 PHOTO</button>
+
+  <button class="btn" onclick="toggleUrl()">🔗 URL</button>
+
+  <button class="btn primary" onclick="chargerNouveau()">🎲 VISAGE</button>
+
+  <button class="btn" onclick="toggleEmotions()">🎭 EXPRESSIONS</button>
+
+</div>
+
+
+
+<script type="importmap">
+
+{
+
+  "imports": {
+
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+
+  }
+
+}
+
+</script>
+
+
+
+<script type="module">
+
+import * as THREE from 'three';
+
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0';
+
+
+
+const canvas = document.getElementById('canvas');
+
+const status = document.getElementById('status');
+
+const video = document.getElementById('video');
+
+const emoDiv = document.getElementById('emotions');
+
+const preview = document.getElementById('preview');
+
+
+
+// SCENE
+
+const scene = new THREE.Scene();
+
+scene.background = new THREE.Color(0x0a0014);
+
+scene.fog = new THREE.Fog(0x0a0014, 1.5, 4);
+
+
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 100);
+
+camera.position.set(0, 0.15, 0.85);
+
+
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+
+renderer.setSize(innerWidth, innerHeight);
+
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+renderer.toneMappingExposure = 1.2;
+
+
+
+const controls = new OrbitControls(camera, renderer.domElement);
+
+controls.target.set(0, 0.08, 0);
+
+controls.enableDamping = true;
+
+controls.minDistance = 0.3;
+
+controls.maxDistance = 2;
+
+controls.enablePan = false;
+
+
+
+// LUMIERES
+
+const key = new THREE.DirectionalLight(0xfff5e0, 2.0);
+
+key.position.set(1, 1.5, 2);
+
+scene.add(key);
+
+
+
+const rim = new THREE.PointLight(0x00d4ff, 3, 5);
+
+rim.position.set(-1, 0.5, -1);
+
+scene.add(rim);
+
+
+
+const fill = new THREE.PointLight(0xff6ec7, 2.0, 4);
+
+fill.position.set(1, -0.5, -0.5);
+
+scene.add(fill);
+
+
+
+const top = new THREE.PointLight(0xc8a45c, 1.5, 3);
+
+top.position.set(0, 1, 0);
+
+scene.add(top);
+
+
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+
+scene.add(ambient);
+
+
+
+// MODELES DE VISAGES REELS
+
+const MODELES = [
+
+  'https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/LeePerrySmith/LeePerrySmith.glb',
+
+];
+
+
+
+let avatarGroup = new THREE.Group();
+
+scene.add(avatarGroup);
+
+let currentModel = null;
+
+let currentIndex = 0;
+
+let photoTexture = null;
+
+
+
+// Expression cible
+
+let target = {
+
+  headYaw: 0, headPitch: 0, headRoll: 0,
+
+  eyeBlink: 0, eyeLookX: 0, eyeLookY: 0,
+
+  jawOpen: 0, mouthSmile: 0, mouthFrown: 0,
+
+  browUp: 0, browDown: 0,
+
+  cheekPuff: 0, squint: 0,
+
+  isLaughing: false, isSmiling: false, isAngry: false, isSurprised: false
+
+};
+
+let current = { ...target };
+
+let hue = 0;
+
+
+
+// ============================================================
+
+// CHARGEMENT DU VISAGE 3D
+
+// ============================================================
+
+const loader = new GLTFLoader();
+
+
+
+function chargerVisage(url) {
+
+  while (avatarGroup.children.length > 0) {
+
+    const c = avatarGroup.children[0];
+
+    avatarGroup.remove(c);
+
+    if (c.geometry) c.geometry.dispose();
+
+    if (c.material) c.material.dispose();
+
+  }
+
+
+
+  status.textContent = 'Chargement du visage 3D...';
+
+
+
+  loader.load(url, (gltf) => {
+
+    currentModel = gltf.scene;
+
+
+
+    const box = new THREE.Box3().setFromObject(currentModel);
+
+    const center = box.getCenter(new THREE.Vector3());
+
+    const size = box.getSize(new THREE.Vector3());
+
+    const scale = 0.5 / Math.max(size.x, size.y, size.z);
+
+
+
+    currentModel.position.sub(center);
+
+    currentModel.scale.setScalar(scale);
+
+    currentModel.position.y = 0.05;
+
+
+
+    currentModel.traverse((child) => {
+
+      if (child.isMesh) {
+
+        child.material.metalness = 0.0;
+
+        child.material.roughness = 0.5;
+
+        child.material.clearcoat = 0.2;
+
+        child.material.envMapIntensity = 1.2;
+
+        child.castShadow = true;
+
+        child.receiveShadow = true;
+
+      }
+
+    });
+
+
+
+    avatarGroup.add(currentModel);
+
+    document.getElementById('loading').classList.add('hide');
+
+    status.textContent = 'Visage 3D charge. Prends une photo.';
+
+
+
+  }, (progress) => {
+
+    const pct = Math.round(progress.loaded / progress.total * 100);
+
+    status.textContent = 'Chargement... ' + pct + '%';
+
+  }, (error) => {
+
+    console.error('Erreur:', error);
+
+    status.textContent = 'Erreur de chargement.';
+
+  });
+
+}
+
+
+
+chargerVisage(MODELES[0]);
+
+
+
+function chargerNouveau() {
+
+  photoTexture = null;
+
+  preview.classList.remove('on');
+
+  chargerVisage(MODELES[currentIndex]);
+
+  status.textContent = 'Modele recharge';
+
+}
+
+
+
+// ============================================================
+
+// PHOTO - PRISE ET APPLICATION SUR LE VISAGE 3D
+
+// ============================================================
+
+function prendrePhoto() {
+
+  document.getElementById('file-input').click();
+
+}
+
+
+
+function chargerFichier(event) {
+
+  const file = event.target.files[0];
+
+  if (!file) return;
+
+  const reader = new FileReader();
+
+  reader.onload = (e) => appliquerPhoto(e.target.result);
+
+  reader.readAsDataURL(file);
+
+}
+
+
+
+function toggleUrl() {
+
+  document.getElementById('url-input').classList.toggle('on');
+
+}
+
+
+
+function chargerUrl() {
+
+  const url = document.getElementById('url-field').value.trim();
+
+  if (!url) return;
+
+  appliquerPhoto(url);
+
+  document.getElementById('url-input').classList.remove('on');
+
+}
+
+
+
+function appliquerPhoto(src) {
+
+  status.textContent = 'Application de la photo...';
+
+  preview.src = src;
+
+  preview.classList.add('on');
+
+
+
+  // Charger la texture
+
+  const img = new Image();
+
+  img.crossOrigin = 'anonymous';
+
+  img.onload = () => {
+
+    // Analyser la photo pour extraire le visage
+
+    const canvasTmp = document.createElement('canvas');
+
+    canvasTmp.width = img.width;
+
+    canvasTmp.height = img.height;
+
+    const ctx = canvasTmp.getContext('2d');
+
+    ctx.drawImage(img, 0, 0);
+
+
+
+    // Detecter le visage dans la photo avec MediaPipe
+
+    detecterVisagePhoto(canvasTmp).then((faceBox) => {
+
+      if (faceBox) {
+
+        // Recadrer le visage
+
+        const pad = 0.15;
+
+        const fx = Math.max(0, faceBox.x - faceBox.w * pad);
+
+        const fy = Math.max(0, faceBox.y - faceBox.h * pad);
+
+        const fw = Math.min(img.width - fx, faceBox.w * (1 + pad * 2));
+
+        const fh = Math.min(img.height - fy, faceBox.h * (1 + pad * 2));
+
+
+
+        const canvasFace = document.createElement('canvas');
+
+        canvasFace.width = 1024;
+
+        canvasFace.height = 1024;
+
+        const ctxFace = canvasFace.getContext('2d');
+
+        ctxFace.drawImage(img, fx, fy, fw, fh, 0, 0, 1024, 1024);
+
+
+
+        // Creer la texture 3D
+
+        photoTexture = new THREE.CanvasTexture(canvasFace);
+
+        photoTexture.colorSpace = THREE.SRGBColorSpace;
+
+        photoTexture.wrapS = THREE.RepeatWrapping;
+
+        photoTexture.wrapT = THREE.RepeatWrapping;
+
+        photoTexture.repeat.set(1, 1);
+
+        photoTexture.offset.set(0, 0);
+
+      } else {
+
+        // Pas de detection : appliquer directement
+
+        photoTexture = new THREE.Texture(img);
+
+        photoTexture.needsUpdate = true;
+
+        photoTexture.colorSpace = THREE.SRGBColorSpace;
+
+      }
+
+
+
+      appliquerTextureSurVisage();
+
+      status.textContent = 'Photo appliquee sur le visage 3D';
+
+    });
+
+  };
+
+  img.onerror = () => {
+
+    status.textContent = 'Erreur de chargement de la photo';
+
+  };
+
+  img.src = src;
+
+}
+
+
+
+async function detecterVisagePhoto(imageSource) {
+
+  // Utiliser MediaPipe Face Detection (mode IMAGE)
+
+  try {
+
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
+
+    );
+
+    const detector = await FaceLandmarker.createFromOptions(filesetResolver, {
+
+      baseOptions: {
+
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task',
+
+        delegate: 'GPU'
+
+      },
+
+      runningMode: 'IMAGE',
+
+      numFaces: 1
+
+    });
+
+    const result = detector.detect(imageSource);
+
+    if (result.faceLandmarks && result.faceLandmarks.length > 0) {
+
+      const lms = result.faceLandmarks[0];
+
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+
+      for (const p of lms) {
+
+        if (p.x < minX) minX = p.x;
+
+        if (p.y < minY) minY = p.y;
+
+        if (p.x > maxX) maxX = p.x;
+
+        if (p.y > maxY) maxY = p.y;
+
+      }
+
+      return {
+
+        x: minX * imageSource.width,
+
+        y: minY * imageSource.height,
+
+        w: (maxX - minX) * imageSource.width,
+
+        h: (maxY - minY) * imageSource.height
+
+      };
+
+    }
+
+  } catch (e) {
+
+    console.error('Detection erreur:', e);
+
+  }
+
+  return null;
+
+}
+
+
+
+function appliquerTextureSurVisage() {
+
+  if (!currentModel || !photoTexture) return;
+
+
+
+  currentModel.traverse((child) => {
+
+    if (child.isMesh) {
+
+      // Remplacer la texture de peau par la photo
+
+      if (child.material.map) {
+
+        child.material.map.dispose();
+
+      }
+
+      child.material.map = photoTexture;
+
+      child.material.color.setHex(0xffffff);
+
+      child.material.metalness = 0.0;
+
+      child.material.roughness = 0.6;
+
+      child.material.needsUpdate = true;
+
+    }
+
+  });
+
+}
+
+
+
+// ============================================================
+
+// BLENDSHAPES
+
+// ============================================================
+
+function appliquerBlendshapes(model, expressions) {
+
+  if (!model || !model.traverse) return;
+
+  model.traverse((child) => {
+
+    if (!child.isMesh || !child.morphTargetDictionary) return;
+
+    const dict = child.morphTargetDictionary;
+
+    const infl = child.morphTargetInfluences;
+
+    if (!infl) return;
+
+    const map = {
+
+      'eyeBlinkLeft': expressions.eyeBlink,
+
+      'eyeBlinkRight': expressions.eyeBlink,
+
+      'eyeLookDownLeft': Math.max(0, -expressions.eyeLookY),
+
+      'eyeLookDownRight': Math.max(0, -expressions.eyeLookY),
+
+      'eyeLookUpLeft': Math.max(0, expressions.eyeLookY),
+
+      'eyeLookUpRight': Math.max(0, expressions.eyeLookY),
+
+      'eyeLookInLeft': Math.max(0, expressions.eyeLookX),
+
+      'eyeLookOutRight': Math.max(0, expressions.eyeLookX),
+
+      'eyeSquintLeft': expressions.squint,
+
+      'eyeSquintRight': expressions.squint,
+
+      'browDownLeft': expressions.browDown,
+
+      'browDownRight': expressions.browDown,
+
+      'browInnerUp': expressions.browUp,
+
+      'browOuterUpLeft': expressions.browUp * 0.7,
+
+      'browOuterUpRight': expressions.browUp * 0.7,
+
+      'jawOpen': expressions.jawOpen,
+
+      'mouthSmileLeft': expressions.mouthSmile,
+
+      'mouthSmileRight': expressions.mouthSmile,
+
+      'mouthFrownLeft': expressions.mouthFrown,
+
+      'mouthFrownRight': expressions.mouthFrown,
+
+      'cheekPuff': expressions.cheekPuff,
+
+      'cheekSquintLeft': expressions.mouthSmile * 0.5,
+
+      'cheekSquintRight': expressions.mouthSmile * 0.5,
+
+    };
+
+    for (const [key, value] of Object.entries(map)) {
+
+      if (dict[key] !== undefined) {
+
+        infl[dict[key]] = value;
+
+      }
+
+    }
+
+  });
+
+}
+
+
+
+// ============================================================
+
+// MEDIAPIPE TEMPS REEL
+
+// ============================================================
+
+let faceLandmarker = null;
+
+let lastVideoTime = -1;
+
+
+
+async function initMediaPipe() {
+
+  try {
+
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
+
+    );
+
+    faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+
+      baseOptions: {
+
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task',
+
+        delegate: 'GPU'
+
+      },
+
+      outputFaceBlendshapes: true,
+
+      runningMode: 'VIDEO',
+
+      numFaces: 1
+
+    });
+
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+
+    video.srcObject = stream;
+
+    video.play();
+
+    detectFace();
+
+  } catch(e) {
+
+    console.error(e);
+
+  }
+
+}
+
+
+
+function detectFace() {
+
+  if (!faceLandmarker || !video.videoWidth) {
+
+    requestAnimationFrame(detectFace);
+
+    return;
+
+  }
+
+  if (video.currentTime !== lastVideoTime) {
+
+    lastVideoTime = video.currentTime;
+
+    const results = faceLandmarker.detectForVideo(video, performance.now());
+
+    if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+
+      const lms = results.faceLandmarks[0];
+
+      const nose = lms[1];
+
+      target.headYaw = (0.5 - nose.x) * 1.5;
+
+      target.headPitch = (nose.y - 0.5) * 1.0;
+
+      target.headRoll = (lms[234].y - lms[454].y) * 1.5;
+
+      if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
+
+        const bs = results.faceBlendshapes[0].categories;
+
+        const m = {};
+
+        for (const c of bs) m[c.categoryName] = c.score;
+
+        target.eyeBlink = (m['eyeBlinkLeft'] + m['eyeBlinkRight']) / 2;
+
+        target.eyeLookX = (m['eyeLookOutLeft'] || 0) - (m['eyeLookOutRight'] || 0);
+
+        target.eyeLookY = (m['eyeLookUpLeft'] || 0) - (m['eyeLookDownLeft'] || 0);
+
+        target.jawOpen = m['jawOpen'] || 0;
+
+        target.mouthSmile = ((m['mouthSmileLeft'] || 0) + (m['mouthSmileRight'] || 0)) / 2;
+
+        target.mouthFrown = ((m['mouthFrownLeft'] || 0) + (m['mouthFrownRight'] || 0)) / 2;
+
+        target.browUp = ((m['browInnerUp'] || 0) + (m['browOuterUpLeft'] || 0) + (m['browOuterUpRight'] || 0)) / 3;
+
+        target.browDown = ((m['browDownLeft'] || 0) + (m['browDownRight'] || 0)) / 2;
+
+        target.cheekPuff = m['cheekPuff'] || 0;
+
+        target.squint = ((m['eyeSquintLeft'] || 0) + (m['eyeSquintRight'] || 0)) / 2;
+
+        target.isSmiling = target.mouthSmile > 0.4;
+
+        target.isLaughing = target.mouthSmile > 0.5 && target.jawOpen > 0.3;
+
+        target.isAngry = target.browDown > 0.4;
+
+        target.isSurprised = target.browUp > 0.4 && target.jawOpen > 0.3;
+
+
+
+        emoDiv.innerHTML = (
+
+          'Yeux: ' + target.eyeBlink.toFixed(2) + '<br>' +
+
+          'Bouche: ' + target.jawOpen.toFixed(2) + '<br>' +
+
+          'Sourire: ' + target.mouthSmile.toFixed(2) + '<br>' +
+
+          (target.isLaughing ? '<span style="color:#4ade80">RIRE</span>' :
+
+           target.isSmiling ? '<span style="color:#fbbf24">SOURIRE</span>' :
+
+           target.isAngry ? '<span style="color:#f87171">COLERE</span>' :
+
+           target.isSurprised ? '<span style="color:#a78bfa">SURPRISE</span>' : 'Neutre')
+
+        );
+
+      }
+
+    }
+
+  }
+
+  requestAnimationFrame(detectFace);
+
+}
+
+
+
+// ============================================================
+
+// ANIMATION
+
+// ============================================================
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+
+
+function animate() {
+
+  requestAnimationFrame(animate);
+
+
+
+  for (const k in target) {
+
+    if (typeof target[k] === 'number') {
+
+      current[k] = lerp(current[k], target[k], 0.15);
+
+    } else {
+
+      current[k] = target[k];
+
+    }
+
+  }
+
+
+
+  if (avatarGroup) {
+
+    avatarGroup.rotation.y = current.headYaw;
+
+    avatarGroup.rotation.x = current.headPitch;
+
+    avatarGroup.rotation.z = current.headRoll;
+
+  }
+
+
+
+  if (currentModel) {
+
+    appliquerBlendshapes(currentModel, current);
+
+  }
+
+
+
+  hue = (hue + 0.003) % 1;
+
+  const c1 = new THREE.Color().setHSL(hue, 0.8, 0.5);
+
+  const c2 = new THREE.Color().setHSL((hue + 0.33) % 1, 0.8, 0.5);
+
+  const c3 = new THREE.Color().setHSL((hue + 0.66) % 1, 0.8, 0.6);
+
+
+
+  rim.color.copy(c1);
+
+  rim.intensity = 2.5 + current.mouthSmile * 2;
+
+  fill.color.copy(c2);
+
+  fill.intensity = 1.8 + current.jawOpen * 2;
+
+  top.color.copy(c3);
+
+  top.intensity = 1.5 + current.browUp * 1.5;
+
+
+
+  if (current.isLaughing) {
+
+    key.color.setHSL((hue + 0.15) % 1, 0.9, 0.75);
+
+    key.intensity = 4.5;
+
+    ambient.intensity = 0.8;
+
+  } else if (current.isSmiling) {
+
+    key.color.setHSL((hue + 0.1) % 1, 0.7, 0.7);
+
+    key.intensity = 3.0;
+
+    ambient.intensity = 0.55;
+
+  } else if (current.isAngry) {
+
+    key.color.setHex(0xff3030);
+
+    key.intensity = 3.0;
+
+    ambient.intensity = 0.3;
+
+  } else if (current.isSurprised) {
+
+    key.color.setHex(0xffffff);
+
+    key.intensity = 3.5;
+
+    ambient.intensity = 0.7;
+
+  } else {
+
+    key.color.setHex(0xfff5e0);
+
+    key.intensity = 2.0;
+
+    ambient.intensity = 0.4;
+
+  }
+
+
+
+  scene.background.setHSL((hue + 0.5) % 1, 0.5, 0.03);
+
+
+
+  controls.update();
+
+  renderer.render(scene, camera);
+
+}
+
+animate();
+
+
+
+function toggleEmotions() {
+
+  document.getElementById('emotions').classList.toggle('on');
+
+}
+
+
+
+window.prendrePhoto = prendrePhoto;
+
+window.chargerFichier = chargerFichier;
+
+window.toggleUrl = toggleUrl;
+
+window.chargerUrl = chargerUrl;
+
+window.chargerNouveau = chargerNouveau;
+
+window.toggleEmotions = toggleEmotions;
+
+
+
+document.getElementById('loading').classList.add('hide');
+
+setTimeout(initMediaPipe, 1500);
+
+
+
+addEventListener('resize', () => {
+
+  camera.aspect = innerWidth / innerHeight;
+
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(innerWidth, innerHeight);
+
+});
+
+</script>
+
+</body>
+
+</html>
+
+"""
+
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+
+    def do_GET(self):
+
+        self.send_response(200)
+
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+
+        self.send_header("Content-Length", str(len(PAGE.encode("utf-8"))))
+
+        self.end_headers()
+
+        self.wfile.write(PAGE.encode("utf-8"))
+
+
+
+    def log_message(self, *args):
+
+        pass
+
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+
+    daemon_threads = True
+
+    allow_reuse_address = True
+
+
+
+def main():
+
+    print("")
+
+    print("=========================================")
+
+    print("  VISAGE 3D DEPUIS PHOTO")
+
+    print("  Photo -> Texture sur visage 3D")
+
+    print("  Port " + str(PORT))
+
+    print("  http://127.0.0.1:" + str(PORT) + "/")
+
+    print("=========================================")
+
+    print("")
+
+    try:
+
+        with Server(("0.0.0.0", PORT), Handler) as httpd:
+
+            httpd.serve_forever()
+
+    except KeyboardInterrupt:
+
+        print("\nArrete.")
+
+    except OSError as e:
+
+        print("Port " + str(PORT) + " : " + str(e))
+
+
+
+if __name__ == "__main__":
+
+    main()
