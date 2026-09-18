@@ -44,3 +44,10 @@ Ce projet explore la modélisation, l'animation et/ou la visualisation d'une fig
 ```bash
 git clone https://github.com/Aissamohammedi88/figure-humain.git
 cd figure-humain
+
+figure-humain/
+├── src/          → Code source
+├── assets/       → Ressources (images, modèles)
+├── docs/         → Documentation
+├── tests/        → Tests
+└── README.md
