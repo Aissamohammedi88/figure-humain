@@ -1,30 +1,157 @@
-name: Django CI
+version: "3.9"
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+services:
 
-jobs:
-  build:
+# ═══════════════════════════════════════════════════════════════
+# DJANGO — Application principale
+# ═══════════════════════════════════════════════════════════════
+web:
+build:
+context: .
+dockerfile: Dockerfile:
 
-    runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 4
-      matrix:
-        python-version: [3.7, 3.8, 3.9]
+container_name: figure _humain_web
+- restart: unless-stopped
+" command: >
+sh -c "python800 manage.py migrate &&
+python manage.py collectstatic --no0input &&
+gunicorn figure_humain.wsgi:application
+--bind 0.0.0.0:8000
+--workers 3
+--timeout 120"
+volumes:
+- .:/app
+- static_volume:/app/staticfiles
+- media_volume:/app/media
+ports:8000"
+env_file:
+- .env
+environment:
+- DJANGO_SETTINGS_MODULE=figure_humain.settings
+- PYTHONUNBUFFERED=1
+depends_on:
+db:
+condition: service_healthy
+redis:
+condition: service_started
+networks:
+- figure_net
 
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    - name: Run Tests
-      run: |
-        python manage.py test
+# ═══════════════════════════════════════════════════════════════
+# POSTGRESQL — Base de données
+# ═══════════════════════════════════════════════════════════════
+db:
+image: postgres:16-alpine
+container_name: figure_humain_db
+restart: unless-stopped
+volumes:
+- postgres_data:/var/lib/postgresql/data
+environment:
+POSTGRES_DB: ${POSTGRES_DB:-figure_humain}
+POSTGRES_USER: ${POSTGRES_USER:-figure_user}
+POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-figure_password}
+healthcheck:
+test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-figure_user}"]
+interval: 10s
+timeout: 5s
+retries: 5
+ports:
+- "5432:5432"
+networks:
+- figure_net
+
+# ═══════════════════════════════════════════════════════════════
+# REDIS — Cache + Broker Celery
+# ═══════════════════════════════════════════════════════════════
+redis:
+image: redis:7-alpine
+container_name: figure_humain_redis
+restart: unless-stopped
+volumes:
+- redis_data:/data
+ports:
+- "6379:6379"
+networks:
+- figure_net
+
+# ═══════════════════════════════════════════════════════════════
+# CELERY WORKER — Tâches asynchrones
+# ═══════════════════════════════════════════════════════════════
+celery:
+build:
+context: .
+dockerfile: Dockerfile
+container_name: figure_humain_celery
+restart: unless-stopped
+command: celery -A figure_humain worker -l info
+volumes:
+- .:/app
+- media_volume:/app/media
+env_file:
+- .env
+environment:
+- DJANGO_SETTINGS_MODULE=figure_humain.settings
+- PYTHONUNBUFFERED=1
+depends_on:
+- db
+- redis
+networks:
+- figure_net
+
+# ═══════════════════════════════════════════════════════════════
+# CELERY BEAT — Tâches planifiées
+# ═══════════════════════════════════════════════════════════════
+celery-beat:
+build:
+context: .
+dockerfile: Dockerfile
+container_name: figure_humain_celery_beat
+restart: unless-stopped
+command: celery -A figure_humain beat -l info
+volumes:
+- .:/app
+env_file:
+- .env
+environment:
+- DJANGO_SETTINGS_MODULE=figure_humain.settings
+- PYTHONUNBUFFERED=1
+depends_on:
+- db
+- redis
+networks:
+- figure_net
+
+# ═══════════════════════════════════════════════════════════════
+# NGINX — Reverse proxy
+# ═══════════════════════════════════════════════════════════════
+nginx:
+image: nginx:alpine
+container_name: figure_humain_nginx
+restart: unless-stopped
+ports:
+- "80:80"
+- "443:443"
+volumes:
+- ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+- static_volume:/app/staticfiles:ro
+- media_volume:/app/media:ro
+depends_on:
+- web
+networks:
+- figure_net
+
+# ═══════════════════════════════════════════════════════════════
+# VOLUMES
+# ═══════════════════════════════════════════════════════════════
+volumes:
+postgres_data:
+redis_data:
+static_volume:
+media_volume:
+
+# ═══════════════════════════════════════════════════════════════
+# RÉSEAUX
+# ═══════════════════════════════════════════════════════════════
+networks:
+figure_net:
+driver: bridge
